@@ -65,9 +65,9 @@ class CanHardware
       bool AddCallback(CanCallback* cb);
       bool RegisterUserMessage(uint32_t canId, uint32_t mask = 0);
       void ClearUserMessages();
-      /** \brief Get RTC time when last message was received
+      /** \brief Get the timebase value when the last message was received
        *
-       * \return uint32_t RTC time
+       * \return seconds from libopeninv_get_seconds()
        *
        */
       uint32_t GetLastRxTimestamp() { return lastRxTimestamp; }

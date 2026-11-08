@@ -24,6 +24,20 @@
 #include "param_save.h"
 #include "hwdefs.h"
 #include "my_string.h"
+#if defined(STM32F4)
+#include "stm32_flash.h"
+#ifndef PARAM_ADDRESS
+#error STM32F4 parameter save needs PARAM_ADDRESS from the application.
+#endif
+#ifndef PARAM_SECTOR
+#error STM32F4 parameter save needs PARAM_SECTOR from the application.
+#endif
+#if defined(CANMAP_SECTOR) && (CANMAP_SECTOR == PARAM_SECTOR)
+#error Parameter store and CAN map share one STM32F4 sector. Give each store its own sector.
+#endif
+static_assert(F4_STORE_FITS(PARAM_ADDRESS, PARAM_BLKSIZE, PARAM_SECTOR),
+   "Parameter store is outside its sector or overlaps the application image");
+#endif
 
 #define NUM_PARAMS ((PARAM_BLKSIZE - 8) / sizeof(PARAM_ENTRY))
 #define PARAM_WORDS (PARAM_BLKSIZE / 4)
@@ -45,27 +59,34 @@ typedef struct
 
 static uint32_t GetFlashAddress()
 {
+#if defined(STM32F4)
+   return PARAM_ADDRESS;
+#else
    uint32_t flashSize = desig_get_flash_size();
 
    //Always save parameters to last flash page
    return FLASH_BASE + flashSize * 1024 - PARAM_BLKNUM * PARAM_BLKSIZE;
+#endif
 }
 
 /**
 * Save parameters to flash
 *
-* @return CRC of parameter flash page
+* @return CRC of parameter flash page.
+*         On STM32F4, 0 means the store was refused and flash was not programmed.
 */
 uint32_t parm_save()
 {
    PARAM_PAGE parmPage;
    uint32_t idx;
    uint32_t paramAddress = GetFlashAddress();
+#if !defined(STM32F4)
    uint32_t check = 0xFFFFFFFF;
    uint32_t* baseAddress = (uint32_t*)paramAddress;
 
    for (int i = 0; i < PARAM_WORDS; i++, baseAddress++)
       check &= *baseAddress;
+#endif
 
    crc_reset();
    memset32((int*)&parmPage, 0xFFFFFFFF, PARAM_WORDS);
@@ -85,6 +106,18 @@ uint32_t parm_save()
    parmPage.crc = crc_calculate_block(((uint32_t*)&parmPage), (2 * NUM_PARAMS));
    flash_unlock();
 
+#if defined(STM32F4)
+   /* Erase only when this store is not blank, and only its own sector.
+    * Do not change the flash wait states here; the application set those
+    * for the running clock.
+    */
+   if (!f4_prepare_store(paramAddress, PARAM_BLKSIZE, PARAM_SECTOR) ||
+       !f4_program_words(paramAddress, (uint32_t*)&parmPage, PARAM_WORDS))
+   {
+      flash_lock();
+      return 0;
+   }
+#else
    if (check != 0xFFFFFFFF)
       flash_erase_page(paramAddress);
 
@@ -93,6 +126,7 @@ uint32_t parm_save()
       uint32_t* pData = ((uint32_t*)&parmPage) + idx;
       flash_program_word(paramAddress + idx * sizeof(uint32_t), *pData);
    }
+#endif
    flash_lock();
    return parmPage.crc;
 }

@@ -20,15 +20,35 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/stm32/gpio.h>
 #include "linbus.h"
+#include "stm32_dma.h"
+
+#if defined(STM32F4)
+#define USART_DMA_PSIZE DMA_SxCR_PSIZE_8BIT
+#define USART_DMA_MSIZE DMA_SxCR_MSIZE_8BIT
+#else
+#define USART_DMA_PSIZE DMA_CCR_PSIZE_8BIT
+#define USART_DMA_MSIZE DMA_CCR_MSIZE_8BIT
+#endif
 
 #define HWINFO_ENTRIES (sizeof(hwInfo) / sizeof(struct HwInfo))
 
 const LinBus::HwInfo LinBus::hwInfo[] =
 {
+#if defined(STM32F4)
+   /* TX stream, RX stream, then the request channel and alternate function.
+    * USART1 TX is DMA2 stream 7. Stream 5 on that channel is USART1 RX.
+    * USART1-3 are AF7. UART4 is AF8.
+    */
+   { USART1, DMA2, 7, 2, GPIOA, GPIO9,  GPIO10, 4, GPIO_AF7 },
+   { USART2, DMA1, 6, 5, GPIOA, GPIO2,  GPIO3,  4, GPIO_AF7 },
+   { USART3, DMA1, 3, 1, GPIOB, GPIO10, GPIO11, 4, GPIO_AF7 },
+   { UART4,  DMA1, 4, 2, GPIOC, GPIO10, GPIO11, 4, GPIO_AF8 },
+#else
    { USART1, DMA1, DMA_CHANNEL4, DMA_CHANNEL5, GPIOA, GPIO_USART1_TX, GPIO_USART1_RX },
    { USART2, DMA1, DMA_CHANNEL7, DMA_CHANNEL6, GPIOA, GPIO_USART2_TX, GPIO_USART2_RX },
    { USART3, DMA1, DMA_CHANNEL2, DMA_CHANNEL3, GPIOB, GPIO_USART3_TX, GPIO_USART3_RX },
    { UART4,  DMA2, DMA_CHANNEL5, DMA_CHANNEL3, GPIOC, GPIO_UART4_TX, GPIO_UART4_RX },
+#endif
 };
 
 /** \brief Create a new LIN bus object but DO NOT configure hardware
@@ -66,8 +86,17 @@ void LinBus::Init( uint32_t usart, int baudrate)
       hw++;
    }
 
+#if defined(STM32F4)
+   /* Both pins must be in AF mode. A plain output disconnects the USART. */
+   gpio_mode_setup(hw->port, GPIO_MODE_AF, GPIO_PUPD_NONE, hw->pintx);
+   gpio_set_output_options(hw->port, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, hw->pintx);
+   gpio_set_af(hw->port, hw->af, hw->pintx);
+   gpio_mode_setup(hw->port, GPIO_MODE_AF, GPIO_PUPD_NONE, hw->pinrx);
+   gpio_set_af(hw->port, hw->af, hw->pinrx);
+#else
    gpio_set_mode(hw->port, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, hw->pintx);
    gpio_set_mode(hw->port, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, hw->pinrx);
+#endif
 
    usart_set_baudrate(usart, baudrate);
    usart_set_databits(usart, 8);
@@ -79,18 +108,29 @@ void LinBus::Init( uint32_t usart, int baudrate)
    usart_enable_tx_dma(usart);
    usart_enable_rx_dma(usart);
 
+#if defined(STM32F4)
+   dma_stream_reset(hw->dma, hw->dmatx);
+   dma_channel_select(hw->dma, hw->dmatx, DMA_SxCR_CHSEL(hw->channel));
+   dma_set_transfer_mode(hw->dma, hw->dmatx, DMA_SxCR_DIR_MEM_TO_PERIPHERAL);
+#else
    dma_channel_reset(hw->dma, hw->dmatx);
    dma_set_read_from_memory(hw->dma, hw->dmatx);
+#endif
    dma_set_peripheral_address(hw->dma, hw->dmatx, (uint32_t)&USART_DR(usart));
    dma_set_memory_address(hw->dma, hw->dmatx, (uint32_t)sendBuffer);
-   dma_set_peripheral_size(hw->dma, hw->dmatx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(hw->dma, hw->dmatx, DMA_CCR_MSIZE_8BIT);
+   dma_set_peripheral_size(hw->dma, hw->dmatx, USART_DMA_PSIZE);
+   dma_set_memory_size(hw->dma, hw->dmatx, USART_DMA_MSIZE);
    dma_enable_memory_increment_mode(hw->dma, hw->dmatx);
 
+#if defined(STM32F4)
+   dma_stream_reset(hw->dma, hw->dmarx);
+   dma_channel_select(hw->dma, hw->dmarx, DMA_SxCR_CHSEL(hw->channel));
+#else
    dma_channel_reset(hw->dma, hw->dmarx);
+#endif
    dma_set_peripheral_address(hw->dma, hw->dmarx, (uint32_t)&USART_DR(usart));
-   dma_set_peripheral_size(hw->dma, hw->dmarx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(hw->dma, hw->dmarx, DMA_CCR_MSIZE_8BIT);
+   dma_set_peripheral_size(hw->dma, hw->dmarx, USART_DMA_PSIZE);
+   dma_set_memory_size(hw->dma, hw->dmarx, USART_DMA_MSIZE);
    dma_enable_memory_increment_mode(hw->dma, hw->dmarx);
 
    usart_enable(usart);
@@ -109,9 +149,9 @@ void LinBus::Request(uint8_t id, uint8_t* data, uint8_t len)
 
    if (len > 8) return;
 
-   dma_disable_channel(hw->dma, hw->dmatx);
+   dma_stop(hw->dma, hw->dmatx);
    dma_set_number_of_data(hw->dma, hw->dmatx, sendLen);
-   dma_disable_channel(hw->dma, hw->dmarx);
+   dma_stop(hw->dma, hw->dmarx);
    dma_set_memory_address(hw->dma, hw->dmarx, (uint32_t)recvBuffer);
    dma_set_number_of_data(hw->dma, hw->dmarx, sizeof(recvBuffer));
 
@@ -126,8 +166,8 @@ void LinBus::Request(uint8_t id, uint8_t* data, uint8_t len)
    dma_clear_interrupt_flags(hw->dma, hw->dmatx, DMA_TCIF);
 
    USART_CR1(hw->usart) |= USART_CR1_SBK;
-   dma_enable_channel(hw->dma, hw->dmatx);
-   dma_enable_channel(hw->dma, hw->dmarx);
+   dma_start(hw->dma, hw->dmatx);
+   dma_start(hw->dma, hw->dmarx);
 }
 
 /** \brief Check whether we received valid data with given PID and length

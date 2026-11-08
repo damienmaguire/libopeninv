@@ -23,6 +23,18 @@
 #include "hwdefs.h"
 #include "my_string.h"
 #include "my_math.h"
+#if defined(STM32F4)
+#include "stm32_flash.h"
+#ifndef CANMAP_ADDRESS
+#error STM32F4 CAN map save needs CANMAP_ADDRESS from the application.
+#endif
+#ifndef CANMAP_SECTOR
+#error STM32F4 CAN map save needs CANMAP_SECTOR from the application.
+#endif
+#if defined(PARAM_SECTOR) && (PARAM_SECTOR == CANMAP_SECTOR)
+#error Parameter store and CAN map share one STM32F4 sector. Give each store its own sector.
+#endif
+#endif
 
 #define SENDMAP_ADDRESS(b)    b
 #define RECVMAP_ADDRESS(b)    (b + sizeof(canSendMap))
@@ -49,8 +61,10 @@
 #define IDMAPSIZE 4
 #define SHIFT_FORCE_FLAG(f) (f << 11)
 #endif // CAN_EXT
+#if !defined(STM32F4)
 #if (MAX_ITEMS * 12 + 2 * MAX_MESSAGES * IDMAPSIZE + 4) > FLASH_PAGE_SIZE
 #error CANMAP will not fit in one flash page
+#endif
 #endif
 
 volatile bool CanMap::isSaving = false;
@@ -353,11 +367,31 @@ int CanMap::Remove(bool rx, uint8_t messageIdx, uint8_t itemidx)
 void CanMap::Save()
 {
    uint32_t crc;
-   uint32_t check = 0xFFFFFFFF;
    uint32_t baseAddress = GetFlashAddress();
-   uint32_t *checkAddress = (uint32_t*)baseAddress;
 
    isSaving = true;
+
+#if defined(STM32F4)
+   /* The saved image is the two id maps, MAX_ITEMS positions, and the CRC.
+    * The in-RAM tail entry is not written. The sector must hold only this
+    * store: erasing it wipes the whole sector. Wait states stay as the
+    * application set them for the running clock.
+    */
+   const uint32_t imageBytes = sizeof(canSendMap) + sizeof(canRecvMap)
+      + sizeof(CANPOS) * MAX_ITEMS + sizeof(uint32_t);
+   static_assert(F4_STORE_FITS(CANMAP_ADDRESS, imageBytes, CANMAP_SECTOR),
+      "CAN map store is outside its sector or overlaps the application image");
+   crc_reset();
+   flash_unlock();
+   if (!f4_prepare_store(baseAddress, imageBytes, CANMAP_SECTOR))
+   {
+      flash_lock();
+      isSaving = false;
+      return;
+   }
+#else
+   uint32_t check = 0xFFFFFFFF;
+   uint32_t *checkAddress = (uint32_t*)baseAddress;
 
    for (int i = 0; i < FLASH_PAGE_SIZE / 4; i++, checkAddress++)
       check &= *checkAddress;
@@ -369,6 +403,7 @@ void CanMap::Save()
 
    if (check != 0xFFFFFFFF) //Only erase when needed
       flash_erase_page(baseAddress);
+#endif
 
    ReplaceParamEnumByUid(canSendMap);
    ReplaceParamEnumByUid(canRecvMap);
@@ -376,7 +411,13 @@ void CanMap::Save()
    SaveToFlash(SENDMAP_ADDRESS(baseAddress), (uint32_t *)canSendMap, SENDMAP_WORDS);
    crc = SaveToFlash(RECVMAP_ADDRESS(baseAddress), (uint32_t *)canRecvMap, RECVMAP_WORDS);
    crc = SaveToFlash(POSMAP_ADDRESS(baseAddress), (uint32_t *)canPosMap, POSMAP_WORDS);
-   SaveToFlash(CRC_ADDRESS(baseAddress), &crc, 1);
+#if defined(STM32F4)
+   /* Leave the CRC blank when a program error is set, so the store
+    * fails its check on the next load instead of looking valid.
+    */
+   if ((FLASH_SR & F4_FLASH_ERR) == 0)
+#endif
+      SaveToFlash(CRC_ADDRESS(baseAddress), &crc, 1);
    flash_lock();
 
    ReplaceParamUidByEnum(canSendMap);
@@ -738,9 +779,13 @@ CanMap::CANIDMAP* CanMap::FindById(CANIDMAP *canMap, uint32_t canId)
 
 uint32_t CanMap::GetFlashAddress()
 {
+#if defined(STM32F4)
+   return CANMAP_ADDRESS;
+#else
    uint32_t flashSize = desig_get_flash_size();
 
    return FLASH_BASE + flashSize * 1024 - FLASH_PAGE_SIZE * CAN1_BLKNUM;
+#endif
 }
 
 void CanMap::ReplaceParamEnumByUid(CANIDMAP *canMap)

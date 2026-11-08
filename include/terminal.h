@@ -48,12 +48,20 @@ private:
    {
       uint32_t usart;
       uint32_t dmactl;
-      uint8_t dmatx;
+      uint8_t dmatx; // F1 channel, F4 stream
       uint8_t dmarx;
       uint32_t port;
       uint16_t pin;
       uint32_t port_re;
       uint16_t pin_re;
+#if defined(STM32F4)
+      uint8_t channel; // DMA request channel, not the stream number
+      uint8_t af;
+      uint32_t rx_port;
+      uint16_t rx_pin;
+      uint32_t rx_port_re;
+      uint16_t rx_pin_re;
+#endif
    };
 
    void ResetDMA();
