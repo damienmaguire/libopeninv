@@ -1,0 +1,2 @@
+#define ERROR_MESSAGE_LIST
+#define ERROR_BUF_SIZE 10

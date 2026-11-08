@@ -35,3 +35,38 @@ jobs:
       - name: Run unit tests on host (Signed CAN receive)
         run: |
           libopeninv/test/test_libopeninv
+
+  # Compile the library sources for the F1 and F4 register maps. This does
+  # not link firmware. The host job above stays on STM32F1.
+  family:
+    name: compile-${{ matrix.family }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [STM32F1, STM32F4]
+
+    steps:
+      - name: Checkout libopeninv
+        uses: actions/checkout@v4
+        with:
+          path: libopeninv
+
+      - name: Checkout libopencm3
+        uses: actions/checkout@v4
+        with:
+          repository: jsphuebner/libopencm3
+          path: libopencm3
+
+      - name: Install the ARM compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libstdc++-arm-none-eabi-dev libnewlib-arm-none-eabi
+
+      - name: Generate libopencm3 IRQ headers
+        run: |
+          make -C libopencm3 include/libopencm3/stm32/f1/nvic.h include/libopencm3/stm32/f4/nvic.h
+
+      - name: Compile library sources
+        run: |
+          make -C libopeninv/test -f family.mk FAMILY=${{ matrix.family }}

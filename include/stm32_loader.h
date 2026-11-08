@@ -20,8 +20,33 @@
 #define STM32_LOADER_H_INCLUDED
 #include <stdint.h>
 
+/* Pin-definition block used by the bootloader.
+ *
+ * On STM32F1 the store is PINDEF_BLKNUM pages down from the end of
+ * flash, and each page is PINDEF_BLKSIZE bytes (1 KiB on the original
+ * boards). Override either macro before including this header.
+ *
+ * STM32F4 flash is erased by sector, not by a 1 KiB page. Counting
+ * back from the end of flash can land in the same large sector as
+ * the firmware or another store. Define PINDEF_ADDRESS and
+ * PINDEF_SECTOR (the libopencm3 sector number) before including
+ * this header, and keep that sector for the pin definitions alone.
+ */
+#ifndef PINDEF_BLKNUM
 #define PINDEF_BLKNUM    3  //3rd to last flash page
+#endif
+#ifndef PINDEF_BLKSIZE
 #define PINDEF_BLKSIZE   1024
+#endif
+
+#if defined(STM32F4)
+#ifndef PINDEF_ADDRESS
+#error STM32F4: define PINDEF_ADDRESS before including stm32_loader.h
+#endif
+#ifndef PINDEF_SECTOR
+#error STM32F4: define PINDEF_SECTOR before including stm32_loader.h
+#endif
+#endif
 #define NUM_PIN_COMMANDS 10
 #define PIN_IN 0
 #define PIN_OUT 1

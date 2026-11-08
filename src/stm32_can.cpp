@@ -24,7 +24,9 @@
 #include <libopencm3/stm32/can.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/rcc.h>
+#if !defined(STM32F4)
 #include <libopencm3/stm32/rtc.h>
+#endif
 #include <libopencm3/cm3/common.h>
 #include <libopencm3/cm3/nvic.h>
 #include "stm32_can.h"
@@ -42,7 +44,15 @@
 #define EXT_IDS_PER_BANK      2
 
 #ifndef CAN_PERIPH_SPEED
+#if defined(STM32F4)
+/* 168 MHz SYSCLK with APB1 divided by 4 is a 42 MHz CAN clock.
+ * Define CAN_PERIPH_SPEED yourself for a different APB1 clock.
+ * 36 selects the table used by the 72 MHz F1 boards.
+ */
+#define CAN_PERIPH_SPEED 42
+#else
 #define CAN_PERIPH_SPEED 36
+#endif
 #endif // CAN_PERIPH_SPEED
 
 // To allow concurrent sending of CAN frames from different contexts we need to
@@ -69,7 +79,7 @@ struct CANSPEED
 
 Stm32Can* Stm32Can::interfaces[MAX_INTERFACES];
 
-static const CANSPEED canSpeed[CanHardware::BaudLast] =
+static constexpr CANSPEED canSpeed[CanHardware::BaudLast] =
 #if CAN_PERIPH_SPEED == 16
 {
    { CAN_BTR_TS1_13TQ, CAN_BTR_TS2_2TQ, 8 }, //125kbps at 16 MHz
@@ -100,8 +110,50 @@ static const CANSPEED canSpeed[CanHardware::BaudLast] =
    { CAN_BTR_TS1_8TQ, CAN_BTR_TS2_3TQ, 90}, //33.3kbps at 36 MHz
    { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_4TQ, 18}, //100kbps at 36 MHz
 };
+#elif CAN_PERIPH_SPEED == 42
+{
+   /* 21 time quanta, sample point at 16/21 (about 76%).
+    * bitrate = 42 MHz / (prescaler * 21).
+    */
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 16 }, //125kbps at 42 MHz
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 8 },  //250kbps at 42 MHz
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 4 },  //500kbps at 42 MHz
+   { 0, 0, 0 },                               //800kbps is not exact at 42 MHz
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 2 },  //1000kbps at 42 MHz
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 60 }, //33.3kbps at 42 MHz
+   { CAN_BTR_TS1_15TQ, CAN_BTR_TS2_5TQ, 20 }, //100kbps at 42 MHz
+};
 #else
 #error Unhandled CAN peripheral speed, please define prescalers
+#endif
+
+#if CAN_PERIPH_SPEED == 42
+static_assert(canSpeed[CanHardware::Baud125].prescaler == 16, "125 kbit/s at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud250].prescaler == 8, "250 kbit/s at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud500].prescaler == 4, "500 kbit/s at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud800].prescaler == 0, "800 kbit/s is not exact at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud1000].prescaler == 2, "1000 kbit/s at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud33].prescaler == 60, "33.3 kbit/s at 42 MHz");
+static_assert(canSpeed[CanHardware::Baud100].prescaler == 20, "100 kbit/s at 42 MHz");
+#endif
+
+#if defined(STM32F4)
+/* F4 alternate function for CAN1 and CAN2 on every pin used below. */
+static void can_pin(uint32_t port, uint16_t pin, bool rx)
+{
+   gpio_mode_setup(port, GPIO_MODE_AF, rx ? GPIO_PUPD_PULLUP : GPIO_PUPD_NONE, pin);
+   if (!rx)
+      gpio_set_output_options(port, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, pin);
+   gpio_set_af(port, GPIO_AF9, pin);
+}
+#endif
+
+#if !defined(STM32F4) && !defined(libopeninv_get_seconds)
+/* Existing F1 applications stamp frames with the RTC counter. */
+extern "C" __attribute__((weak)) uint32_t libopeninv_get_seconds(void)
+{
+   return rtc_get_counter_val();
+}
 #endif
 
 
@@ -123,6 +175,26 @@ Stm32Can::Stm32Can(uint32_t baseAddr, enum baudrates baudrate, bool remap)
    switch (baseAddr)
    {
       case CAN1:
+#if defined(STM32F4)
+         /* Same remap meaning as F1: default PA11/PA12, remap PB8/PB9. */
+         if (remap)
+         {
+            can_pin(GPIOB, GPIO8, true);
+            can_pin(GPIOB, GPIO9, false);
+         }
+         else
+         {
+            can_pin(GPIOA, GPIO11, true);
+            can_pin(GPIOA, GPIO12, false);
+         }
+
+         nvic_enable_irq(NVIC_CAN1_RX0_IRQ);
+         nvic_set_priority(NVIC_CAN1_RX0_IRQ, 0xf << 4); //lowest priority
+         nvic_enable_irq(NVIC_CAN1_RX1_IRQ);
+         nvic_set_priority(NVIC_CAN1_RX1_IRQ, 0xf << 4); //lowest priority
+         nvic_enable_irq(NVIC_CAN1_TX_IRQ);
+         nvic_set_priority(NVIC_CAN1_TX_IRQ, 0xf << 4); //lowest priority
+#else
          if (remap)
          {
             // Configure CAN pin: RX (input pull-up).
@@ -147,9 +219,26 @@ Stm32Can::Stm32Can(uint32_t baseAddr, enum baudrates baudrate, bool remap)
          nvic_set_priority(NVIC_CAN_RX1_IRQ, 0xf << 4); //lowest priority
          nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ); //CAN TX
          nvic_set_priority(NVIC_USB_HP_CAN_TX_IRQ, 0xf << 4); //lowest priority
+#endif
          interfaces[0] = this;
          break;
       case CAN2:
+         /* CAN2's acceptance filters live in the CAN1 block. The
+          * application enables both CAN clocks before this constructor.
+          */
+#if defined(STM32F4)
+         /* Same remap meaning as F1: default PB12/PB13, remap PB5/PB6. */
+         if (remap)
+         {
+            can_pin(GPIOB, GPIO5, true);
+            can_pin(GPIOB, GPIO6, false);
+         }
+         else
+         {
+            can_pin(GPIOB, GPIO12, true);
+            can_pin(GPIOB, GPIO13, false);
+         }
+#else
          if (remap)
          {
             // Configure CAN pin: RX (input pull-up).
@@ -166,6 +255,7 @@ Stm32Can::Stm32Can(uint32_t baseAddr, enum baudrates baudrate, bool remap)
             // Configure CAN pin: TX.-
             gpio_set_mode(GPIO_BANK_CAN2_TX, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO_CAN2_TX);
          }
+#endif
 
          //CAN2 RX and TX IRQs
          nvic_enable_irq(NVIC_CAN2_RX0_IRQ); //CAN RX
@@ -196,6 +286,13 @@ Stm32Can::Stm32Can(uint32_t baseAddr, enum baudrates baudrate, bool remap)
  */
 void Stm32Can::SetBaudrate(enum baudrates baudrate)
 {
+   /* A zero prescaler marks a rate this clock cannot make exactly.
+    * 800 kbit/s at 42 MHz is the case that matters: 42e6 / 800e3 is
+    * not an integer, so programming it would run about 1% fast.
+    */
+   if (canSpeed[baudrate].prescaler == 0)
+      return;
+
 	// CAN cell init.
 	 // Setting the bitrate to 250KBit. APB1 = 36MHz,
 	 // prescaler = 9 -> 4MHz time quanta frequency.
@@ -269,7 +366,7 @@ void Stm32Can::HandleMessage(int fifo)
    while (can_receive(canDev, fifo, true, &id, &ext, &rtr, &fmi, &length, (uint8_t*)data, 0) > 0)
    {
       HandleRx(id, data, length);
-      lastRxTimestamp = rtc_get_counter_val();
+      lastRxTimestamp = libopeninv_get_seconds();
    }
 }
 
@@ -390,17 +487,29 @@ void Stm32Can::ConfigureFilters()
 }
 
 /* Interrupt service routines */
+#if defined(STM32F4)
+extern "C" void can1_rx0_isr(void)
+#else
 extern "C" void usb_lp_can_rx0_isr(void)
+#endif
 {
    Stm32Can::GetInterface(0)->HandleMessage(0);
 }
 
+#if defined(STM32F4)
+extern "C" void can1_rx1_isr(void)
+#else
 extern "C" void can_rx1_isr()
+#endif
 {
    Stm32Can::GetInterface(0)->HandleMessage(1);
 }
 
+#if defined(STM32F4)
+extern "C" void can1_tx_isr(void)
+#else
 extern "C" void usb_hp_can_tx_isr()
+#endif
 {
    Stm32Can::GetInterface(0)->HandleTx();
 }

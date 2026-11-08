@@ -24,6 +24,44 @@
 #include <libopencm3/stm32/dma.h>
 #include "terminal.h"
 #include "printf.h"
+#include "stm32_dma.h"
+
+#if defined(STM32F4)
+#define USART_DMA_PSIZE DMA_SxCR_PSIZE_8BIT
+#define USART_DMA_MSIZE DMA_SxCR_MSIZE_8BIT
+#else
+#define USART_DMA_PSIZE DMA_CCR_PSIZE_8BIT
+#define USART_DMA_MSIZE DMA_CCR_MSIZE_8BIT
+#endif
+
+/* enabled: pin is the USART TX alternate function.
+ * disabled: pin is a floating input, so another node can drive the line.
+ */
+static void set_tx_pin(uint32_t port, uint16_t pin, bool enabled, uint8_t af)
+{
+#if defined(STM32F4)
+   if (enabled)
+   {
+      gpio_mode_setup(port, GPIO_MODE_AF, GPIO_PUPD_NONE, pin);
+      gpio_set_output_options(port, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, pin);
+      gpio_set_af(port, af, pin);
+   }
+   else
+   {
+      gpio_mode_setup(port, GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin);
+   }
+#else
+   (void)af;
+   if (enabled)
+   {
+      gpio_set_mode(port, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, pin);
+   }
+   else
+   {
+      gpio_set_mode(port, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, pin);
+   }
+#endif
+}
 
 #define HWINFO_ENTRIES (sizeof(hwInfo) / sizeof(struct HwInfo))
 
@@ -33,10 +71,21 @@
 
 const Terminal::HwInfo Terminal::hwInfo[] =
 {
+#if defined(STM32F4)
+   /* TX stream, RX stream, request channel, AF, TX pin, remapped TX, RX pin, remapped RX.
+    * USART1 TX is DMA2 stream 7. Stream 5 on that channel is USART1 RX.
+    * USART1-3 are AF7. UART4 is AF8.
+    */
+   { USART1, DMA2, 7, 2, GPIOA, GPIO9,  GPIOB, GPIO6,  4, GPIO_AF7, GPIOA, GPIO10, GPIOB, GPIO7 },
+   { USART2, DMA1, 6, 5, GPIOA, GPIO2,  GPIOD, GPIO5,  4, GPIO_AF7, GPIOA, GPIO3,  GPIOD, GPIO6 },
+   { USART3, DMA1, 3, 1, GPIOB, GPIO10, GPIOC, GPIO10, 4, GPIO_AF7, GPIOB, GPIO11, GPIOC, GPIO11 },
+   { UART4,  DMA1, 4, 2, GPIOC, GPIO10, GPIOC, GPIO10, 4, GPIO_AF8, GPIOC, GPIO11, GPIOC, GPIO11 },
+#else
    { USART1, DMA1, DMA_CHANNEL4, DMA_CHANNEL5, GPIOA, GPIO_USART1_TX, GPIOB, GPIO_USART1_RE_TX },
    { USART2, DMA1, DMA_CHANNEL7, DMA_CHANNEL6, GPIOA, GPIO_USART2_TX, GPIOD, GPIO_USART2_RE_TX },
    { USART3, DMA1, DMA_CHANNEL2, DMA_CHANNEL3, GPIOB, GPIO_USART3_TX, GPIOC, GPIO_USART3_PR_TX },
    { UART4,  DMA2, DMA_CHANNEL5, DMA_CHANNEL3, GPIOC, GPIO_UART4_TX,  GPIOC, GPIO_UART4_TX },
+#endif
 };
 
 Terminal* Terminal::defaultTerminal;
@@ -66,8 +115,21 @@ Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap, bool ec
 
    defaultTerminal = this;
 
-   gpio_set_mode(remap ? hw->port_re : hw->port, GPIO_MODE_OUTPUT_50_MHZ,
-               GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, remap ? hw->pin_re : hw->pin);
+#if defined(STM32F4)
+   uint8_t af = hw->af;
+#else
+   uint8_t af = 0;
+#endif
+   set_tx_pin(remap ? hw->port_re : hw->port, remap ? hw->pin_re : hw->pin, true, af);
+#if defined(STM32F4)
+   /* F4 does not connect the USART until the pin is in AF mode.
+    * F1 reset state is already a floating input, which is what RX needs.
+    */
+   gpio_mode_setup(remap ? hw->rx_port_re : hw->rx_port, GPIO_MODE_AF, GPIO_PUPD_NONE,
+      remap ? hw->rx_pin_re : hw->rx_pin);
+   gpio_set_af(remap ? hw->rx_port_re : hw->rx_port, hw->af,
+      remap ? hw->rx_pin_re : hw->rx_pin);
+#endif
 
    usart_set_baudrate(usart, USART_BAUDRATE);
    usart_set_databits(usart, 8);
@@ -78,19 +140,30 @@ Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap, bool ec
    usart_enable_rx_dma(usart);
    usart_enable_tx_dma(usart);
 
+#if defined(STM32F4)
+   dma_stream_reset(hw->dmactl, hw->dmatx);
+   dma_channel_select(hw->dmactl, hw->dmatx, DMA_SxCR_CHSEL(hw->channel));
+   dma_set_transfer_mode(hw->dmactl, hw->dmatx, DMA_SxCR_DIR_MEM_TO_PERIPHERAL);
+#else
    dma_channel_reset(hw->dmactl, hw->dmatx);
    dma_set_read_from_memory(hw->dmactl, hw->dmatx);
+#endif
    dma_set_peripheral_address(hw->dmactl, hw->dmatx, (uint32_t)&USART_DR(usart));
-   dma_set_peripheral_size(hw->dmactl, hw->dmatx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(hw->dmactl, hw->dmatx, DMA_CCR_MSIZE_8BIT);
+   dma_set_peripheral_size(hw->dmactl, hw->dmatx, USART_DMA_PSIZE);
+   dma_set_memory_size(hw->dmactl, hw->dmatx, USART_DMA_MSIZE);
    dma_enable_memory_increment_mode(hw->dmactl, hw->dmatx);
 
+#if defined(STM32F4)
+   dma_stream_reset(hw->dmactl, hw->dmarx);
+   dma_channel_select(hw->dmactl, hw->dmarx, DMA_SxCR_CHSEL(hw->channel));
+#else
    dma_channel_reset(hw->dmactl, hw->dmarx);
+#endif
    dma_set_peripheral_address(hw->dmactl, hw->dmarx, (uint32_t)&USART_DR(usart));
-   dma_set_peripheral_size(hw->dmactl, hw->dmarx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(hw->dmactl, hw->dmarx, DMA_CCR_MSIZE_8BIT);
+   dma_set_peripheral_size(hw->dmactl, hw->dmarx, USART_DMA_PSIZE);
+   dma_set_memory_size(hw->dmactl, hw->dmarx, USART_DMA_MSIZE);
    dma_enable_memory_increment_mode(hw->dmactl, hw->dmarx);
-   dma_enable_channel(hw->dmactl, hw->dmarx);
+   dma_start(hw->dmactl, hw->dmarx);
 
    ResetDMA();
 
@@ -117,7 +190,7 @@ void Terminal::Run()
       if (inBuf[currentIdx - 1] == '\n' || inBuf[currentIdx - 1] == '\r')
       {
          //Do not accept a new command while processing the current one
-         dma_disable_channel(hw->dmactl, hw->dmarx);
+         dma_stop(hw->dmactl, hw->dmarx);
          if (currentIdx > 1) //handle just \n quicker
          {
             inBuf[currentIdx] = 0;
@@ -257,16 +330,16 @@ void Terminal::FlushInput()
 void Terminal::DisableTxDMA()
 {
    txDmaEnabled = false;
-   dma_disable_channel(hw->dmactl, hw->dmatx);
+   dma_stop(hw->dmactl, hw->dmatx);
    usart_disable_tx_dma(usart);
 }
 
 void Terminal::ResetDMA()
 {
-   dma_disable_channel(hw->dmactl, hw->dmarx);
+   dma_stop(hw->dmactl, hw->dmarx);
    dma_set_memory_address(hw->dmactl, hw->dmarx, (uint32_t)inBuf);
    dma_set_number_of_data(hw->dmactl, hw->dmarx, bufSize);
-   dma_enable_channel(hw->dmactl, hw->dmarx);
+   dma_start(hw->dmactl, hw->dmarx);
 }
 
 void Terminal::EnableUart(char* arg)
@@ -274,18 +347,21 @@ void Terminal::EnableUart(char* arg)
    arg = my_trim(arg);
    int val = my_atoi(arg);
 
+#if defined(STM32F4)
+   uint8_t af = hw->af;
+#else
+   uint8_t af = 0;
+#endif
    if (val == nodeId)
    {
       enabled = true;
-      gpio_set_mode(remap ? hw->port_re : hw->port, GPIO_MODE_OUTPUT_50_MHZ,
-               GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, remap ? hw->pin_re : hw->pin);
+      set_tx_pin(remap ? hw->port_re : hw->port, remap ? hw->pin_re : hw->pin, true, af);
       Send("OK\r\n");
    }
    else
    {
       enabled = false;
-      gpio_set_mode(remap ? hw->port_re : hw->port, GPIO_MODE_INPUT,
-               GPIO_CNF_INPUT_FLOAT, remap ? hw->pin_re : hw->pin);
+      set_tx_pin(remap ? hw->port_re : hw->port, remap ? hw->pin_re : hw->pin, false, af);
    }
 }
 
@@ -348,11 +424,11 @@ void Terminal::SendCurrentBuffer(uint32_t len)
 {
    while (!dma_get_interrupt_flag(hw->dmactl, hw->dmatx, DMA_TCIF) && !firstSend);
 
-   dma_disable_channel(hw->dmactl, hw->dmatx);
+   dma_stop(hw->dmactl, hw->dmatx);
    dma_set_number_of_data(hw->dmactl, hw->dmatx, len);
    dma_set_memory_address(hw->dmactl, hw->dmatx, (uint32_t)outBuf[curBuf]);
    dma_clear_interrupt_flags(hw->dmactl, hw->dmatx, DMA_TCIF);
-   dma_enable_channel(hw->dmactl, hw->dmatx);
+   dma_start(hw->dmactl, hw->dmatx);
 
    curBuf = !curBuf; //switch buffers
    firstSend = false; //only needed once so we don't get stuck in the while loop above

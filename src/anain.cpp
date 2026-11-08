@@ -23,10 +23,22 @@
 #include <libopencm3/stm32/adc.h>
 #include "anain.h"
 #include "my_math.h"
+#if defined(STM32F4)
+#include "delay.h"
+#endif
+
+#if defined(STM32F4) && ADC_COUNT != 1
+#error STM32F4 analogue input supports one ADC only. ADC_COUNT must be 1.
+#endif
 
 #if ADC_COUNT == 1
+   #if defined(STM32F4)
+   #define TRANSFER_PSIZE DMA_SxCR_PSIZE_16BIT
+   #define TRANSFER_MSIZE DMA_SxCR_MSIZE_16BIT
+   #else
    #define TRANSFER_PSIZE DMA_CCR_PSIZE_16BIT
    #define TRANSFER_MSIZE DMA_CCR_MSIZE_16BIT
+   #endif
 #elif ADC_COUNT == 2
    #define TRANSFER_PSIZE DMA_CCR_PSIZE_32BIT
    #define TRANSFER_MSIZE DMA_CCR_MSIZE_32BIT
@@ -40,7 +52,13 @@
    #error ADC_COUNT must be 1 or 2
 #endif // ADC_COUNT
 
+#if defined(STM32F4)
+#define ADC_DMA_CTRL DMA2
+#define ADC_DMA_CHAN 0
+#else
+#define ADC_DMA_CTRL DMA1
 #define ADC_DMA_CHAN 1
+#endif
 #define MEDIAN3_FROM_ADC_ARRAY(a) median3(*a, *(a + ANA_IN_COUNT), *(a + 2*ANA_IN_COUNT))
 
 uint8_t AnaIn::channel_array[ADC_COUNT][ANA_IN_COUNT / ADC_COUNT];
@@ -56,6 +74,36 @@ ANA_IN_LIST
 */
 void AnaIn::Start()
 {
+#if defined(STM32F4)
+   /* ADC1 DMA is DMA2 stream 0, request channel 0. There is no F1-style
+    * calibration. EOCS makes one DMA request per channel in the scan,
+    * and DDS keeps those requests coming in circular mode.
+    */
+   adc_power_off(ADC1);
+   adc_enable_scan_mode(ADC1);
+   adc_set_continuous_conversion_mode(ADC1);
+   adc_set_right_aligned(ADC1);
+   adc_set_sample_time_on_all_channels(ADC1, SAMPLE_TIME);
+   adc_set_regular_sequence(ADC1, ANA_IN_COUNT, channel_array[0]);
+   adc_eoc_after_each(ADC1);
+   adc_enable_dma(ADC1);
+   adc_set_dma_continue(ADC1);
+   adc_power_on(ADC1);
+   uDelay(3);
+
+   dma_stream_reset(ADC_DMA_CTRL, ADC_DMA_CHAN);
+   dma_channel_select(ADC_DMA_CTRL, ADC_DMA_CHAN, DMA_SxCR_CHSEL_0);
+   dma_set_peripheral_address(ADC_DMA_CTRL, ADC_DMA_CHAN, (uint32_t)&ADC_DR(ADC1));
+   dma_set_memory_address(ADC_DMA_CTRL, ADC_DMA_CHAN, (uint32_t)values);
+   dma_set_peripheral_size(ADC_DMA_CTRL, ADC_DMA_CHAN, TRANSFER_PSIZE);
+   dma_set_memory_size(ADC_DMA_CTRL, ADC_DMA_CHAN, TRANSFER_MSIZE);
+   dma_set_number_of_data(ADC_DMA_CTRL, ADC_DMA_CHAN, NUM_SAMPLES * ANA_IN_COUNT);
+   dma_enable_memory_increment_mode(ADC_DMA_CTRL, ADC_DMA_CHAN);
+   dma_enable_circular_mode(ADC_DMA_CTRL, ADC_DMA_CHAN);
+   dma_enable_stream(ADC_DMA_CTRL, ADC_DMA_CHAN);
+
+   adc_start_conversion_regular(ADC1);
+#else
    uint32_t adc[] = { ADC1, ADC2 };
 
    for (int i = 0; i < ADC_COUNT; i++)
@@ -86,11 +134,16 @@ void AnaIn::Start()
    adc_set_dual_mode(ADC_CR1_DUALMOD_CRSISM);
    #endif
    adc_start_conversion_regular(ADC1);
+#endif
 }
 
 void AnaIn::Configure(uint32_t port, uint8_t pin)
 {
+#if defined(STM32F4)
+   gpio_mode_setup(port, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1 << pin);
+#else
    gpio_set_mode(port, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, 1 << pin);
+#endif
 
    #if ADC_COUNT == 1
    channel_array[0][GetIndex()] = AdcChFromPort(port, pin);
@@ -178,6 +231,8 @@ uint8_t AnaIn::AdcChFromPort(uint32_t command_port, int command_bit)
      PC4 ADC12_IN14
      PC5 ADC12_IN15
      temp ADC12_IN16
+     On STM32F405/F407 the temperature sensor is also ADC1 channel 16.
+     STM32F42x/F43x connect it to channel 18 instead.
      */
     switch (command_port)
     {

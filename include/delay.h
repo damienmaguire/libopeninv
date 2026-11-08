@@ -24,11 +24,23 @@
  *
  * \param[in] period Length of the delay in micro-seconds
  */
+/* Busy-loop iterations per microsecond.
+ * 12 was measured by toggling a pin for 1000 us on a 72 MHz STM32F103.
+ * The F4 default scales that measurement to a 168 MHz SYSCLK
+ * (12 * 168 / 72 = 28). Define DELAY_CYCLES_PER_US before including
+ * this header when the clock is different. This is still a busy loop.
+ */
+#ifndef DELAY_CYCLES_PER_US
+#if defined(STM32F4)
+#define DELAY_CYCLES_PER_US 28
+#else
+#define DELAY_CYCLES_PER_US 12
+#endif
+#endif
+
 inline void uDelay(int period)
 {
-    // Empirically determined constant by measurement of GPIO toggle
-    // of 1000 uS delay on a 72MHz STM32F103 processor
-    static const int CyclesPerMicroSecond = 12;
+    static const int CyclesPerMicroSecond = DELAY_CYCLES_PER_US;
 
     int iterations = period * CyclesPerMicroSecond;
 

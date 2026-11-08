@@ -39,11 +39,15 @@ class LinBus
       {
          uint32_t usart;
          uint32_t dma;
-         uint8_t dmatx;
+         uint8_t dmatx; // F1 channel, F4 stream
          uint8_t dmarx;
          uint32_t port;
          uint16_t pintx;
          uint16_t pinrx;
+#if defined(STM32F4)
+         uint8_t channel; // DMA request channel, not the stream number
+         uint8_t af;
+#endif
       };
 
 

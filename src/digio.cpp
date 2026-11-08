@@ -35,6 +35,67 @@ DIG_IO_LIST
 
 void DigIo::Configure(uint32_t port, uint16_t pin, PinMode::PinMode pinMode)
 {
+#if defined(STM32F4)
+   // F4 has separate bits for the pull, the output type and the mode.
+   // The alternate-function number is selected by the peripheral driver.
+   uint8_t mode = GPIO_MODE_INPUT;
+   uint8_t pull = GPIO_PUPD_PULLDOWN;
+   uint8_t type = GPIO_OTYPE_PP;
+   bool setHigh = false;
+
+   _port = port;
+   _pin = pin;
+   _invert = 0;
+
+   switch (pinMode)
+   {
+      default:
+      case PinMode::INPUT_PD:
+         break;
+      case PinMode::INPUT_PD_INV:
+         _invert = 1;
+         break;
+      case PinMode::INPUT_PU:
+         pull = GPIO_PUPD_PULLUP;
+         break;
+      case PinMode::INPUT_PU_INV:
+         pull = GPIO_PUPD_PULLUP;
+         _invert = 1;
+         break;
+      case PinMode::INPUT_FLT:
+         pull = GPIO_PUPD_NONE;
+         break;
+      case PinMode::INPUT_FLT_INV:
+         pull = GPIO_PUPD_NONE;
+         _invert = 1;
+         break;
+      case PinMode::INPUT_AIN:
+         mode = GPIO_MODE_ANALOG;
+         pull = GPIO_PUPD_NONE;
+         break;
+      case PinMode::OUTPUT:
+         mode = GPIO_MODE_OUTPUT;
+         pull = GPIO_PUPD_NONE;
+         break;
+      case PinMode::OUTPUT_OD:
+         mode = GPIO_MODE_OUTPUT;
+         pull = GPIO_PUPD_NONE;
+         type = GPIO_OTYPE_OD;
+         setHigh = true;
+         break;
+      case PinMode::OUTPUT_ALT:
+         mode = GPIO_MODE_AF;
+         pull = GPIO_PUPD_NONE;
+         break;
+   }
+
+   // Match the F1 path: set the output latch before changing the mode.
+   if (setHigh)
+      gpio_set(port, pin);
+   if (mode == GPIO_MODE_OUTPUT || mode == GPIO_MODE_AF)
+      gpio_set_output_options(port, type, GPIO_OSPEED_50MHZ, pin);
+   gpio_mode_setup(port, mode, pull, pin);
+#else
    uint8_t mode = GPIO_MODE_INPUT;
    uint8_t cnf = GPIO_CNF_INPUT_PULL_UPDOWN;
    uint16_t val = DIG_IO_OFF;
@@ -90,5 +151,6 @@ void DigIo::Configure(uint32_t port, uint16_t pin, PinMode::PinMode pinMode)
       gpio_set(port, pin);
    }
    gpio_set_mode(port, mode, cnf, pin);
+#endif
 }
 
